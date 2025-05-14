@@ -10,7 +10,7 @@ authors = ["David Horner"]
 
 
 [features]
-default = ["lua","tls"]
+default = ["tls"]
 lua = ["mlua"]
 tls = [
     "tokio-rustls",
@@ -23,9 +23,10 @@ tls = [
 ]
 
 [workspace]
-members = ["jetkvm_control_svr"]
+members = [ "debugchrome","jetkvm_control_svr"]
 
 [dependencies]
+jetkvm_control_platform = { path = "jetkvm_control_platform" }
 dialoguer = "0.11.0"
 anyhow = "1.0.95"
 base64 = "0.22.1"

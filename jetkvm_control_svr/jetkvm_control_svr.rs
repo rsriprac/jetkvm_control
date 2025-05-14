@@ -277,7 +277,9 @@ async fn process_request(
                         &platform_util::active_window().unwrap_or("{}".to_string()),
                     )
                     .unwrap_or(serde_json::json!({})),
-
+                    "active_tabs" => 
+                        platform_util::active_tabs_async().await
+                    .unwrap_or(serde_json::json!({})),
                     _ => serde_json::json!({ "message": "Command executed successfully" }),
                 },
             }

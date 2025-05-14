@@ -134,3 +134,50 @@ pub fn active_window() -> Option<String> {
         Some(info.to_string())
     }
 }
+
+pub fn active_tabs() -> Option<serde_json::Value> {
+    let tabs: Vec<serde_json::Value> = reqwest::blocking::get("http://localhost:9222/json")
+        .ok()?
+        .json()
+        .ok()?;
+
+    let tab_info: Vec<serde_json::Value> = tabs
+        .iter()
+        .map(|tab| {
+            serde_json::json!({
+                "title": tab["title"].as_str().unwrap_or("<no title>"),
+                "url": tab["url"].as_str().unwrap_or("<no url>")
+            })
+        })
+        .collect();
+
+    Some(serde_json::json!(tab_info))
+}
+
+pub async fn active_tabs_async() -> Option<serde_json::Value> {
+    let tabs: Vec<serde_json::Value> = reqwest::get("http://localhost:9222/json")
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let tab_info: Vec<serde_json::Value> = tabs
+        .iter()
+        .map(|tab| {
+            serde_json::json!({
+                "title": tab["title"].as_str().unwrap_or("<no title>"),
+                "url": tab["url"].as_str().unwrap_or("<no url>")
+            })
+        })
+        .collect();
+
+    Some(serde_json::json!(tab_info))
+}
+
+/// Run the module for debugging
+fn main() {
+    println!("Active Process: {:?}", active_process());
+    println!("Active Window: {:?}", active_window());
+    println!("Active Tabs: {:?}", active_tabs());
+}

@@ -65,8 +65,53 @@ struct JetKVMControlSvrClient {
     stream: Option<ClientStream>,
 }
 
-#[cfg(feature = "lua")]
 pub trait Conn {
+    fn connect(
+        &mut self,
+        host:  &str,
+        port: u16,
+        password:  &str,
+        ca_cert_path:  &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(bool, String), Box<dyn std::error::Error>>> + Send + '_>>;
+
+    fn send_command(
+        &mut self,
+        command: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>>;
+}
+
+impl Conn for JetKVMControlSvrClient {
+    fn connect(
+        &mut self,
+        host:  &str,
+        port: u16,
+        _password:  &str,
+        _ca_cert_path:  &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(bool, String), Box<dyn std::error::Error>>> + Send + '_>>
+    {
+        let host = host.to_string();
+        Box::pin(async move {
+            // Your actual connection logic goes here.
+            // This is just a dummy implementation:
+            Ok((true, format!("Connected to {}:{}", host, port)))
+        })
+    }
+
+    fn send_command(
+        &mut self,
+        _command: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>> {
+        Box::pin(async move {
+            // Your command-sending logic goes here.
+            // For now, we'll simply print the command.
+            // println!("Sending command: {}", command.to_owned());
+            Ok(())
+        })
+    }
+}
+
+#[cfg(feature = "lua")]
+pub trait LuaConn {
     fn connect(
         &mut self,
         host: String,
@@ -82,7 +127,7 @@ pub trait Conn {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = LuaResult<()>> + Send + '_>>;
 }
 #[cfg(feature = "lua")]
-impl Conn for JetKVMControlSvrClient {
+impl LuaConn for LuaJetKVMControlSvrClient {
     fn connect(
         &mut self,
         host: String,
@@ -141,10 +186,109 @@ impl JetKVMControlSvrClient {
             Err(e) => Ok((false, format!("Failed to connect: {}", e))),
         }
     }
+    
+    async fn connect(
+        &mut self,
+        host: &str,
+        port: u16,
+        password: &str,
+        ca_cert_path: &str,
+    ) -> Result<(bool, String), Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        self.host = host.to_owned();
+        self.port = port;
+        self.password = password.to_owned();
+        self.ca_cert_path = ca_cert_path.to_owned();
+
+        println!(
+            "Connecting to {}:{} with password {} ({})",
+            self.host, self.port, self.password, self.ca_cert_path
+        );
+        let addr = format!("{}:{}", self.host, self.port);
+        #[cfg(feature = "tls")]
+        let tls_connector = load_tls_config(&self.ca_cert_path)?;
+        println!(
+            "Connecting to {}:{} with password {}",
+            self.host, self.port, self.password
+        );
+        let stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        println!(
+            "Connecting to {}:{} with password {}",
+            self.host, self.port, self.password
+        );
+        #[cfg(feature = "tls")]
+        let domain = rustls::pki_types::ServerName::try_from(self.host.clone()).unwrap();
+        println!(
+            "Connecting to {}:{} with password {}",
+            self.host, self.port, self.password
+        );
+        #[cfg(feature = "tls")]
+        let mut tls_stream = tls_connector
+            .connect(domain, stream)
+            .await?;
+        println!("Connected to server");
+
+        // ✅ Step 1: Read JSON Challenge from Server
+        let mut buffer = vec![0; 1024];
+        #[cfg(feature = "tls")]
+        let n = tls_stream
+            .read(&mut buffer)
+            .await?;
+        #[cfg(feature = "tls")]
+        let server_response: serde_json::Value = serde_json::from_slice(&buffer[..n])
+            .map_err(|e| format!("Invalid JSON response: {}", e))?;
+
+        #[cfg(feature = "tls")]
+        let challenge = server_response["challenge"].as_u64().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Invalid JSON response"),
+            )
+        })?;
+        self.challenge = Some(challenge);
+
+        println!("Authentication successful");
+        // ✅ Step 2: Send Authentication Request
+        let auth_request = RpcRequest {
+            command: "auth".to_string(),
+            data: None,
+            hmac: compute_hmac(&self.password, challenge, "auth"),
+        };
+
+        let mut request_json = serde_json::to_string(&auth_request).unwrap();
+        request_json.push('\n');
+        tls_stream
+            .write_all(request_json.as_bytes())
+            .await?;
+
+        // ✅ Step 3: Read Authentication Response
+        let n = tls_stream
+            .read(&mut buffer)
+            .await?;
+        let auth_response: serde_json::Value = serde_json::from_slice(&buffer[..n])
+            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Invalid JSON response: {}", e))))?;
+
+        // ✅ Step 4: Validate Authentication
+        if !auth_response["success"].as_bool().unwrap_or(false) {
+            let error_msg = auth_response["error"]
+                .as_str()
+                .unwrap_or("Unknown authentication error");
+            return Ok((false, error_msg.to_string())); // ✅ Return `(false, "Authentication failed")`
+        }
+
+        println!("Authentication successful");
+        // ✅ Step 5: Authentication Successful
+        self.stream = Some(tls_stream);
+        let success_message = "Connected successfully".to_string();
+        Ok((true, success_message)) // ✅ Return `(true, "Connected successfully")`
+    }
 
     // use mlua::LuaSerdeExt;
     #[cfg(all(feature = "lua", feature = "tls"))]
-    async fn connect(
+    async fn lua_connect(
         &mut self,
         host: String,
         port: u16,
@@ -248,8 +392,36 @@ impl JetKVMControlSvrClient {
         Ok((true, success_message)) // ✅ Return `(true, "Connected successfully")`
     }
 
+    async fn send_command(&mut self, command: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Some(tls_stream) = &mut self.stream {
+            let challenge = self.challenge.unwrap_or(0);
+            let request = RpcRequest {
+                command: command.to_string(),
+                data: None,
+                hmac: compute_hmac(&self.password, challenge, &command),
+            };
+
+            let mut request_json = serde_json::to_string(&request).unwrap();
+            request_json.push('\n');
+            tls_stream
+                .write_all(request_json.as_bytes())
+                .await?;
+
+            let mut buffer = vec![0; 1024];
+            let n = tls_stream
+                .read(&mut buffer)
+                .await?;
+            let response: RpcResponse =
+                serde_json::from_slice(&buffer[..n])?;
+            Ok(response.data)
+        } else {
+            Err("Not connected to server".into())
+        }
+    }
+
     #[cfg(all(feature = "lua", feature = "tls"))]
-    async fn send_command(&mut self, lua: &Lua, command: String) -> LuaResult<mlua::Value> {
+    async fn lua_send_command(&mut self, lua: &Lua, command: String) -> LuaResult<mlua::Value> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         if let Some(tls_stream) = &mut self.stream {
             let challenge = self.challenge.unwrap_or(0);
@@ -320,7 +492,7 @@ impl UserData for LuaJetKVMControlSvrClient {
                     let mut client = this.lock().await;
 
                     let (success, message) = (*client)
-                        .connect(host, port, password, ca_cert_path)
+                        .lua_connect(host, port, password, ca_cert_path)
                         .await?;
 
                     println!("dropping client");
@@ -336,7 +508,7 @@ impl UserData for LuaJetKVMControlSvrClient {
             let this = std::sync::Arc::clone(&this.0);
             async move {
                 let mut client = this.lock().await;
-                client.send_command(&lua, command).await
+                client.lua_send_command(&lua, command).await
             }
         });
     }
@@ -394,7 +566,7 @@ pub fn register_lua(lua: &Lua) -> LuaResult<()> {
 
 /// Loads the TLS configuration
 #[cfg(feature = "tls")]
-fn load_tls_config(ca_cert_path: &str) -> std::io::Result<tokio_rustls::TlsConnector> {
+pub fn load_tls_config(ca_cert_path: &str) -> std::io::Result<tokio_rustls::TlsConnector> {
     let mut root_store = rustls::RootCertStore::empty();
     let cert_file = std::fs::File::open(ca_cert_path)?;
     let mut cert_reader = std::io::BufReader::new(cert_file);
@@ -414,7 +586,7 @@ fn load_tls_config(ca_cert_path: &str) -> std::io::Result<tokio_rustls::TlsConne
 
 /// Computes HMAC for authentication
 #[cfg(feature = "tls")]
-fn compute_hmac(password: &str, challenge: u64, command: &str) -> String {
+pub fn compute_hmac(password: &str, challenge: u64, command: &str) -> String {
     use hmac::Mac;
 
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(password.as_bytes())
@@ -463,7 +635,7 @@ async fn main() -> LuaResult<()> {
                 let mut client_guard = client.lock().await;
                 println!("Connecting to {}:{} with password {}", host, port, password);
                 let result = client_guard
-                    .connect(host, port, password, ca_cert_path)
+                    .lua_connect(host, port, password, ca_cert_path)
                     .await?;
                 Ok(result)
             }
@@ -477,7 +649,7 @@ async fn main() -> LuaResult<()> {
             let client = client.clone();
             async move {
                 let mut client_guard = client.lock().await;
-                let result = client_guard.send_command(&lua, command).await?;
+                let result = client_guard.lua_send_command(&lua, command).await?;
                 Ok(result)
             }
         })?
@@ -553,35 +725,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     } else {
-        // Normal (non-test) mode implementation goes here.
-        // For example, you might launch an interactive session or run a specific Lua script.
-        // If not implemented, we exit with an error.
+    let args = Args::parse();
+
+    let client = std::sync::Arc::new(tokio::sync::Mutex::new(JetKVMControlSvrClient::new()));
+
+    {
+    let client = client.clone();
+    let mut client_guard = client.lock().await;
+    // Establish connection
+    let (success, message) = client_guard.connect(&args.host, args.port, &args.password, &args.ca_cert_path).await?;
+    if success {
+        println!("✅ Connected successfully");
+
+        // Send a command
+        let response_window = client_guard.send_command("active_window").await?;
+        println!("Response from 'active_window': {}", response_window);
+
+        let response_process = client_guard.send_command("active_process").await?;
+        println!("Response from 'active_process': {}", response_process);
+        
+        println!("{:?}",jetkvm_control_platform::windows_util::active_tabs_async().await);
+            // scan the “usual” remote‐debugging range
+    let ports = jetkvm_control_platform::scan_chrome_debug_ports(9222, 9322).await;
+    if ports.is_empty() {
+        println!("No Chrome debug ports found");
+    } else {
+        println!("Chrome debug listening on ports: {:?}", ports);
+    }
+        let response_process = client_guard.send_command("active_tabs").await?;
+        println!("Response from 'active_tabs': {}", response_process);
+    } else {
+        println!("❌ Failed to connect");
+    }
+    }
         eprintln!("Normal mode not implemented in this example.");
         std::process::exit(1);
     }
-
-    // let args = Args::parse();
-
-    // let client = std::sync::Arc::new(tokio::sync::Mutex::new(JetKVMControlSvrClient::new()));
-
-    // {
-    // let client = client.clone();
-    // let mut client_guard = client.lock().await;
-    todo!();
-    // // Establish connection
-    // if client_guard.connect(&args.host, args.port, &args.password, &args.ca_cert_path).await? {
-    //     println!("✅ Connected successfully");
-
-    //     // Send a command
-    //     let response_window = client_guard.send_command("active_window").await?;
-    //     println!("Response from 'active_window': {}", response_window);
-
-    //     let response_process = client_guard.send_command("active_process").await?;
-    //     println!("Response from 'active_process': {}", response_process);
-    // } else {
-    //     println!("❌ Failed to connect");
-    // }
-    // }
-
-    // Ok(())
 }
