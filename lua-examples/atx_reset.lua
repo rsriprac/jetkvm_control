@@ -9,7 +9,7 @@
 --
 -- Usage:
 --   jetkvm_control atx_reset.lua
---   jetkvm_control -H 10.0.0.132 -P yourpassword atx_reset.lua
+--   jetkvm_control -H 192.168.0.100 -P yourpassword atx_reset.lua
 
 print("Sending ATX reset...")
 local result = send_rpc("setATXPowerAction", '{"action": "reset"}')

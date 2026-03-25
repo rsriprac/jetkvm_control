@@ -55,3 +55,4 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 regex = "1.11.1"
+tempfile = "3"

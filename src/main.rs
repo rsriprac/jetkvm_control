@@ -41,18 +41,42 @@ struct CliConfig {
     /// Initialize or edit the jetkvm_control.toml interactively.
     #[arg(short = 'c', long = "config_init")]
     config_init: bool,
-    
+
+    /// Path to a specific jetkvm_control.toml config file.
+    /// When provided, this takes precedence over the default search locations
+    /// (current directory, CARGO_MANIFEST_DIR, /etc/jetkvm_control/).
+    #[arg(short = 'f', long = "config")]
+    config_path: Option<String>,
 }
 
 /// Loads configuration from file (or uses the default) and then applies CLI overrides.
+///
+/// If `--config <path>` was provided, loads exclusively from that path (errors are fatal).
+/// Otherwise, falls back to the default search order: current directory, CARGO_MANIFEST_DIR,
+/// then system-wide (/etc/jetkvm_control/). CLI flags (-H, -P, etc.) override any file values.
 fn load_and_override_config(cli_config: &CliConfig) -> JetKvmConfig {
-    let mut config = JetKvmConfig::load().unwrap_or_else(|err| {
-        warn!(
-            "Failed to load jetkvm_control.toml ({}). Using default configuration.",
-            err
-        );
-        (JetKvmConfig::default(),"".to_string(),true)
-    });
+    let mut config = if let Some(path) = &cli_config.config_path {
+        // Explicit --config path: load from that file or fail with a clear error.
+        match JetKvmConfig::load_from_file(path) {
+            Ok(cfg) => {
+                println!("✅ Loaded config from: {}", path);
+                (cfg, path.clone(), true)
+            }
+            Err(err) => {
+                eprintln!("Error: Failed to load config from '{}': {}", path, err);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // No explicit path: search default locations.
+        JetKvmConfig::load().unwrap_or_else(|err| {
+            warn!(
+                "Failed to load jetkvm_control.toml ({}). Using default configuration.",
+                err
+            );
+            (JetKvmConfig::default(), "".to_string(), true)
+        })
+    };
 
     if let Some(host) = &cli_config.host {
         config.0.host = host.clone();
